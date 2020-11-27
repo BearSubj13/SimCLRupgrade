@@ -19,19 +19,32 @@ from modules.transformations import TransformsSimCLR
 from modules.sync_batchnorm import convert_model
 from utils import yaml_config_hook
 
+from my_algorithm.decoding import decoder_step_loss_func, Decoder, train_autoencoder
+from my_algorithm.metric_learning import penalty_for_fake
 
-def train(args, train_loader, model, criterion, optimizer, writer):
+
+def train(args, train_loader, model, decoder, criterion, optimizer, optimizer_decoder, writer, epoch):
     loss_epoch = 0
+    loss_epoch_decoder = 0
+    penalty_epoch = 0
     for step, ((x_i, x_j), _) in enumerate(train_loader):
         optimizer.zero_grad()
         x_i = x_i.cuda(non_blocking=True)
         x_j = x_j.cuda(non_blocking=True)
+
+        loss_decoder = decoder_step_loss_func(model, decoder, x_i, x_j, optimizer_decoder)
 
         # positive pair, with encoding
         h_i, h_j, z_i, z_j = model(x_i, x_j)
 
         loss = criterion(z_i, z_j)
         loss.backward()
+
+        coeff_lambda = 0.01
+        penalty = coeff_lambda * penalty_for_fake(model, decoder, x_i, x_j, z_i, z_j)
+        penalty.backward()
+
+        penalty_epoch += penalty.item()
 
         optimizer.step()
 
@@ -47,7 +60,8 @@ def train(args, train_loader, model, criterion, optimizer, writer):
             args.global_step += 1
 
         loss_epoch += loss.item()
-    return loss_epoch
+        loss_epoch_decoder += loss_decoder
+    return loss_epoch, loss_epoch_decoder, penalty_epoch
 
 
 def main(gpu, args):
@@ -124,24 +138,41 @@ def main(gpu, args):
     if args.nr == 0:
         writer = SummaryWriter()
 
+    #added by @IvanKruzhilov
+    decoder = Decoder(3, 3, args.image_size)
+    optimizer_decoder = torch.optim.Adam(decoder.parameters(), lr=0.001)
+    decoder.load_state_dict(torch.load('save/decoder_my_algorithm_augmented.pt'))
+    decoder = decoder.to(args.device)
+
+
     args.global_step = 0
     args.current_epoch = 0
     for epoch in range(args.start_epoch, args.epochs):
         lr = optimizer.param_groups[0]["lr"]
-        loss_epoch = train(args, train_loader, model, criterion, optimizer, writer)
+        scatter_radius = 0.5 if epoch < 80 else 2.0
+        loss_epoch, loss_epoch_decoder, penalty_epoch = \
+            train(args, train_loader, model, decoder, criterion, optimizer, \
+            optimizer_decoder, writer, scatter_radius)
+        loss_mean, bce_mean = train_autoencoder(model, decoder, train_loader, optimizer, optimizer_decoder, freeze_encoder=True)
 
         if args.nr == 0 and scheduler:
             scheduler.step()
 
         if args.nr == 0 and epoch % 10 == 0:
             save_model(args, model, optimizer)
+            torch.save(decoder.state_dict(), os.path.join(args.model_path,'decoder{0}.pt'.format(epoch)))
 
         if args.nr == 0:
             writer.add_scalar("Loss/train", loss_epoch / len(train_loader), epoch)
             writer.add_scalar("Misc/learning_rate", lr, epoch)
+            mean_loss = loss_epoch / len(train_loader)
+            mean_loss_decoder = loss_epoch_decoder / len(train_loader)
+            mean_penalty = penalty_epoch / len(train_loader)
             print(
-                f"Epoch [{epoch}/{args.epochs}]\t Loss: {loss_epoch / len(train_loader)}\t lr: {round(lr, 5)}"
+                f"Epoch [{epoch}/{args.epochs}]\t Loss: {mean_loss}\t decoder loss: {mean_loss_decoder}\t \
+                penalty: {mean_penalty}\t lr: {round(lr, 5)}"
             )
+            print('loss: ',loss_mean, 'bce: ', bce_mean)
             args.current_epoch += 1
 
     ## end training
