@@ -130,27 +130,30 @@ def decoder_step_loss_func(encoder, decoder, batch1, batch2, optimizer):
     return loss
 
 
-
-
 def decoder_step(encoder, decoder, batch1, batch2, optimizer_decoder, criterion, freeze_encoder=True, optimizer_encoder=None):
-    assert freeze_encoder or optimizer_decoder is not None
+    assert freeze_encoder or optimizer_encoder is not None
 
+    decoder.train()
     optimizer_decoder.zero_grad()
+
     if freeze_encoder:
+        encoder.eval()
         with torch.no_grad():
-           _, _, z1, z2 = encoder(batch1, batch2)
+            _, _, z1, z2 = encoder(batch1, batch2)
     else:
         optimizer_encoder.zero_grad()
+        encoder.train()
         _, _, z1, z2 = encoder(batch1, batch2)
+
+
     z1 = z1.detach()
     z2 = z2.detach()
-    image_decoded1 = decoder.decode(z1)
-    image_decoded2 = decoder.decode(z2)
+    image_decoded1 = decoder(z1)
+    image_decoded2 = decoder(z2)
 
     loss1 = criterion(image_decoded1, batch1)
-    loss1.backward()
     loss2 = criterion(image_decoded2, batch2)
-    loss2.backward()
+    (loss1+loss2).backward()
     optimizer_decoder.step()
     if not freeze_encoder:
         optimizer_encoder.step()
@@ -173,7 +176,7 @@ def train_autoencoder(encoder, decoder, data_loader, optimizer_encoder, optimize
         x_j = x_j.cuda(non_blocking=True)
 
         loss, image_decoded1, image_decoded2, _, _ = decoder_step(encoder, decoder, x_i, x_j, \
-                                                     optimizer_decoder, criterion, freeze_encoder, optimizer_encoder)
+                             optimizer_decoder, criterion, freeze_encoder, optimizer_encoder)
         bce_loss = nn.MSELoss()
         image_decoded1 = image_decoded1.detach()
         image_decoded2 = image_decoded2.detach()

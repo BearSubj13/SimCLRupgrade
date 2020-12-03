@@ -61,6 +61,7 @@ def create_data_loaders_from_arrays(X_train, y_train, X_test, y_test, batch_size
 def train(args, loader, simclr_model, model, criterion, optimizer):
     loss_epoch = 0
     accuracy_epoch = 0
+    model.train()
     for step, (x, y) in enumerate(loader):
         optimizer.zero_grad()
 
@@ -117,6 +118,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    print('dataset: ', args.dataset)
     if args.dataset == "STL10":
         train_dataset = torchvision.datasets.STL10(
             args.dataset_dir,
@@ -170,6 +172,7 @@ if __name__ == "__main__":
     model_fp = os.path.join(
         args.model_path, "checkpoint_{}.tar".format(args.epoch_num)
     )
+    print('model path: ', model_fp)
     simclr_model.load_state_dict(torch.load(model_fp, map_location=args.device.type))
     simclr_model = simclr_model.to(args.device)
     simclr_model.eval()
@@ -193,14 +196,20 @@ if __name__ == "__main__":
     )
 
     for epoch in range(args.logistic_epochs):
-        loss_epoch, accuracy_epoch = train(
-            args, arr_train_loader, simclr_model, model, criterion, optimizer
-        )
-        print(
-            f"Epoch [{epoch}/{args.logistic_epochs}]\t Loss: {loss_epoch / len(train_loader)}\t Accuracy: {accuracy_epoch / len(train_loader)}"
-        )
+        loss_epoch, accuracy_epoch = train(args, arr_train_loader, simclr_model, model, criterion, optimizer)
+        print(f"Epoch [{epoch}/{args.logistic_epochs}]\t Loss: {loss_epoch / len(train_loader)}\t Accuracy: {accuracy_epoch / len(train_loader)}")
 
-    # final testing
+        if epoch % 10 == 0:
+            # test on the test split
+            loss_epoch, accuracy_epoch = test(
+                args, arr_test_loader, simclr_model, model, criterion, optimizer
+            )
+            print()
+            print(
+                f"[TEST]\t Loss: {loss_epoch / len(test_loader)}\t Accuracy: {accuracy_epoch / len(test_loader)}"
+            )
+            print()
+
     loss_epoch, accuracy_epoch = test(
         args, arr_test_loader, simclr_model, model, criterion, optimizer
     )

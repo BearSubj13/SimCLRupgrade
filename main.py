@@ -20,10 +20,11 @@ from modules.sync_batchnorm import convert_model
 from utils import yaml_config_hook
 
 from my_algorithm.decoding import decoder_step_loss_func, Decoder, train_autoencoder
-from my_algorithm.metric_learning import penalty_for_fake
+from my_algorithm.metric_learning import penalty_for_fake, penalty_for_random
 
 
-def train(args, train_loader, model, decoder, criterion, optimizer, optimizer_decoder, writer, epoch):
+def train(args, train_loader, model, decoder, criterion, optimizer, \
+          optimizer_decoder, writer, random_fake=False, scatter_radius=1.0):
     loss_epoch = 0
     loss_epoch_decoder = 0
     penalty_epoch = 0
@@ -34,19 +35,23 @@ def train(args, train_loader, model, decoder, criterion, optimizer, optimizer_de
 
         loss_decoder = decoder_step_loss_func(model, decoder, x_i, x_j, optimizer_decoder)
 
+        model.train()
         # positive pair, with encoding
         h_i, h_j, z_i, z_j = model(x_i, x_j)
 
         loss = criterion(z_i, z_j)
-        loss.backward()
 
-        coeff_lambda = 0.01
-        penalty = coeff_lambda * penalty_for_fake(model, decoder, x_i, x_j, z_i, z_j)
-        penalty.backward()
+        coeff_lambda = args.random_coefficient
+        random_fake = True# step % 2 == 0
+        if not random_fake:
+            penalty = penalty_for_fake(model, decoder, x_i, x_j, z_i, z_j, scatter_radius=scatter_radius)
+        else:
+            penalty = penalty_for_random(model, decoder, x_i, x_j)
+
+        (loss + coeff_lambda * penalty).backward()
+        optimizer.step()
 
         penalty_epoch += penalty.item()
-
-        optimizer.step()
 
         if dist.is_available() and dist.is_initialized():
             loss = loss.data.clone()
@@ -116,6 +121,7 @@ def main(gpu, args):
         model_fp = os.path.join(
             args.model_path, "checkpoint_{}.tar".format(args.epoch_num)
         )
+        print(model_fp)
         model.load_state_dict(torch.load(model_fp, map_location=args.device.type))
     model = model.to(args.device)
 
@@ -141,7 +147,7 @@ def main(gpu, args):
     #added by @IvanKruzhilov
     decoder = Decoder(3, 3, args.image_size)
     optimizer_decoder = torch.optim.Adam(decoder.parameters(), lr=0.001)
-    decoder.load_state_dict(torch.load('save/decoder_my_algorithm_augmented.pt'))
+    #decoder.load_state_dict(torch.load('save/decoder_my_algorithm_augmented.pt'))
     decoder = decoder.to(args.device)
 
 
@@ -149,18 +155,27 @@ def main(gpu, args):
     args.current_epoch = 0
     for epoch in range(args.start_epoch, args.epochs):
         lr = optimizer.param_groups[0]["lr"]
-        scatter_radius = 0.5 if epoch < 80 else 2.0
+        scatter_radius = 0.2
+        random_fake = None#set in train fucntion now
+
         loss_epoch, loss_epoch_decoder, penalty_epoch = \
             train(args, train_loader, model, decoder, criterion, optimizer, \
-            optimizer_decoder, writer, scatter_radius)
-        loss_mean, bce_mean = train_autoencoder(model, decoder, train_loader, optimizer, optimizer_decoder, freeze_encoder=True)
+            optimizer_decoder, writer, random_fake, scatter_radius)
+
+        loss_mean, bce_mean = train_autoencoder(model, decoder, train_loader, None, \
+                                                optimizer_decoder, freeze_encoder=True)
 
         if args.nr == 0 and scheduler:
             scheduler.step()
 
-        if args.nr == 0 and epoch % 10 == 0:
+        if args.nr == 0 and epoch % 5 == 0:
             save_model(args, model, optimizer)
             torch.save(decoder.state_dict(), os.path.join(args.model_path,'decoder{0}.pt'.format(epoch)))
+
+        if epoch % 10 == 0:
+            decoder = Decoder(3, 3, args.image_size)
+            optimizer_decoder = torch.optim.Adam(decoder.parameters(), lr=0.001)
+            decoder = decoder.to(args.device)
 
         if args.nr == 0:
             writer.add_scalar("Loss/train", loss_epoch / len(train_loader), epoch)
@@ -172,7 +187,7 @@ def main(gpu, args):
                 f"Epoch [{epoch}/{args.epochs}]\t Loss: {mean_loss}\t decoder loss: {mean_loss_decoder}\t \
                 penalty: {mean_penalty}\t lr: {round(lr, 5)}"
             )
-            print('loss: ',loss_mean, 'bce: ', bce_mean)
+            print('loss: ',loss_mean, 'mse: ', bce_mean)
             args.current_epoch += 1
 
     ## end training
